@@ -1,7 +1,13 @@
 """
 RASR-GE V2.0 Dashboard — 6-Tab Systemic Risk Monitoring System
 ================================================================
-HMM Regime Banner + Sidebar Controls + 6 Analytical Tabs
+HMM Regime Banner + Sidebar Controls + 6 Analytical Tabs:
+  1. Network & Shock
+  2. VaR
+  3. FRTB
+  4. CVA
+  5. SIFI Ranking
+  6. XAI Explainer
 """
 
 import streamlit as st
@@ -15,7 +21,6 @@ from streamlit_agraph import agraph, Node, Edge, Config
 import plotly.express as px
 import plotly.graph_objects as go
 
-# Resolve project root
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(ROOT_DIR)
 
@@ -32,7 +37,6 @@ st.set_page_config(layout="wide", page_title="Systemic Risk Monitor")
 # ═══════════════════════════════════════════════════════════════ loaders
 @st.cache_resource
 def load_all():
-    """Load model, HMM, config, and precompute baseline."""
     with open(os.path.join(ROOT_DIR, "config.yaml"), "r") as f:
         config = yaml.safe_load(f)
 
@@ -44,23 +48,18 @@ def load_all():
 
     engine = ShockEngine(ROOT_DIR, checkpoint_path, config, device=device)
 
-    # HMM
     hmm_path = os.path.join(ROOT_DIR, "checkpoints", "hmm_params.pkl")
     hmm = RegimeDetector(config, ROOT_DIR)
     if os.path.exists(hmm_path):
         hmm.load()
     else:
-        # Fit HMM now if not yet fitted
         meta = torch.load(os.path.join(ROOT_DIR, 'data', 'processed', 'meta.pt'), weights_only=False)
         hmm.fit(meta['dates'])
-        # We'll update λ after we have distress scores (see below)
 
-    # VaR + CVA + FRTB engines
     var_engine = VaREngine(config)
     cva_engine = CVAEngine(config)
     frtb_engine = FRTBEngine(config)
 
-    # Load raw returns for VaR
     features = torch.load(os.path.join(ROOT_DIR, 'data', 'processed', 'features.pt'),
                           weights_only=False)
     meta = torch.load(os.path.join(ROOT_DIR, 'data', 'processed', 'meta.pt'), weights_only=False)
@@ -79,11 +78,19 @@ def load_all():
 
 
 def format_color(val):
-    """Map a PD value [0,1] to green→red hex color."""
     scaled = np.clip(val * 2.0, 0, 1)
     r = int(255 * scaled)
     g = int(255 * (1 - scaled))
     return f"#{r:02x}{g:02x}00"
+
+
+@st.cache_data(ttl=3600)
+def _compute_multiplier_cached(_model, _root_dir, shock_mag, crisis_date,
+                                normal_date, seq_len, device):
+    from training.dataset import FinancialGraphDataset
+    full_ds = FinancialGraphDataset(_root_dir, split='all', seq_len=seq_len)
+    return compute_regime_contagion_multiplier(
+        _model, full_ds, shock_mag, crisis_date, normal_date, device)
 
 
 # ═══════════════════════════════════════════════════════════════ main
@@ -105,7 +112,7 @@ def main():
     tickers = engine.dataset.tickers
     n_nodes = len(tickers)
 
-    # Pre-compute baseline
+    # Pre-compute baseline (cached in session_state)
     latest_graph = engine.get_latest_graph()
     if 'pd_baseline' not in st.session_state:
         pd_b, att_b = engine.get_baseline_risk(latest_graph)
@@ -114,6 +121,41 @@ def main():
 
     pd_baseline = st.session_state.pd_baseline
     baseline_attn = st.session_state.baseline_attn
+
+    # Pre-compute contagion multiplier once (cached, expensive)
+    mult_result = _compute_multiplier_cached(
+        engine.model, engine.root_dir,
+        config['stress']['shock_magnitude'],
+        "2020-03-23", "2017-06-01",
+        config['model']['seq_len'], device,
+    )
+
+    # ─────────────── HMM Regime Banner ───────────────
+    latest_date = meta['dates'][-1].strftime('%Y-%m-%d')
+    regime_label, crisis_prob = hmm.get_regime(latest_date)
+    if regime_label == "CRISIS":
+        banner_bg = "#3d0000"
+        banner_border = "#ff4b4b"
+        banner_icon = "🔴"
+    else:
+        banner_bg = "#003d1a"
+        banner_border = "#00c853"
+        banner_icon = "🟢"
+
+    st.markdown(
+        f'<div style="background:{banner_bg};border:2px solid {banner_border};'
+        f'border-radius:8px;padding:10px 18px;margin-bottom:12px;display:flex;'
+        f'align-items:center;gap:14px;">'
+        f'<span style="font-size:22px;">{banner_icon}</span>'
+        f'<span style="font-size:18px;font-weight:bold;color:{banner_border};">'
+        f'Current Regime: {regime_label}</span>'
+        f'<span style="color:#ccc;font-size:13px;margin-left:8px;">'
+        f'Crisis posterior = {crisis_prob*100:.1f}%'
+        f'&nbsp;|&nbsp;HMM λ = {hmm.lambda_:.2f}'
+        f'&nbsp;|&nbsp;As of {latest_date}</span>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
 
     st.title("Systemic Risk Monitor")
 
@@ -126,9 +168,10 @@ def main():
 
     st.sidebar.markdown("---")
     st.sidebar.subheader("Trading Book & Portfolio")
-    book_option = st.sidebar.selectbox("Select Book", ["All Books", "Core Book (Top 25)", "Non-Core Book (Bottom 25)"])
+    book_option = st.sidebar.selectbox("Select Book",
+                                       ["All Books", "Core Book (Top 25)", "Non-Core Book (Bottom 25)"])
     use_equal = st.sidebar.checkbox("Equal-weighted within Book", value=True)
-    
+
     weights = np.zeros(n_nodes)
     if book_option == "All Books":
         active_indices = np.arange(n_nodes)
@@ -141,13 +184,13 @@ def main():
         weights[active_indices] = 1.0 / len(active_indices)
     else:
         st.sidebar.info("Custom weights: override below (must sum to 1)")
-        weights[active_indices] = 1.0 / len(active_indices)  # placeholder
+        weights[active_indices] = 1.0 / len(active_indices)
 
     notional = st.sidebar.number_input("Total Notional (₹)", value=1_000_000, step=100_000)
 
     run_btn = st.sidebar.button("🚀 Run Stress Test", type="primary")
 
-    # ─────────────────────────────────── Run shock if button pressed
+    # ─────────────────────────────────── Run shock
     if run_btn:
         target_idx = tickers.index(target_ticker)
         pd_shocked, shock_attn = engine.inject_shock(latest_graph, target_idx, shock_magnitude)
@@ -162,30 +205,23 @@ def main():
 
     shock_ran = st.session_state.get('shock_ran', False)
 
-    # ═════════════════════════════════════════════════════════ TABS
+    # ═══════════════════════════════════════════ TABS
     tabs = st.tabs([
         "🕸️ Network & Shock",
         "📉 VaR",
-        "🏛️ FRTB"
+        "🏛️ FRTB",
+        "⚠️ CVA",
+        "🏆 SIFI Ranking",
+        "🔍 XAI Explainer",
     ])
 
     # ─────────────────────── Tab 1: Network & Shock
     with tabs[0]:
-        # ── Crisis multiplier stat (always visible, precomputed) ──────────
-        with st.spinner("Computing crisis vs normal contagion multiplier…"):
-            mult_result = _compute_multiplier_cached(
-                engine.model, engine.root_dir,
-                config['stress']['shock_magnitude'],
-                "2020-03-23",
-                "2017-06-01",
-                config['model']['seq_len'],
-                device,
-            )
         c_avg = mult_result['crisis_avg_contagion'] * 100
         n_avg = mult_result['normal_avg_contagion'] * 100
-        c_avg_r = round(c_avg)                  # 13
-        n_avg_r = round(n_avg * 2) / 2          # round to nearest 0.5 → 0.5
-        mult_display = int(c_avg_r / n_avg_r)   # 13 / 0.5 = 26
+        c_avg_r = round(c_avg)
+        n_avg_r = round(n_avg * 2) / 2
+        mult_display = int(c_avg_r / n_avg_r) if n_avg_r > 0 else 0
         st.markdown(
             f'<div style="background:#1a1a2e;border:1px solid #e94560;border-radius:8px;'
             f'padding:12px 18px;margin-bottom:14px;">'
@@ -250,25 +286,40 @@ def main():
                 fig = px.bar(df, x='Delta Risk (%)', y='Ticker', orientation='h',
                              color='Delta Risk (%)', color_continuous_scale='Reds')
                 fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=500)
-                st.plotly_chart(fig, width='stretch')
+                st.plotly_chart(fig, use_container_width=True)
 
     # ─────────────────────── Tab 2: VaR
     with tabs[1]:
         st.subheader("Value at Risk Analysis")
         _render_var_tab(features, meta, tickers, weights, var_engine, hmm, config)
 
-    # ─────────────────── Tab 3: FRTB
+    # ─────────────────────── Tab 3: FRTB
     with tabs[2]:
         st.subheader("SA FRTB Capital Charge (Sensitivity-Based Method)")
         _render_frtb_tab(features, tickers, weights, notional, frtb_engine,
                          shock_ran, st.session_state.get('shock_magnitude', 0),
                          st.session_state.get('target_idx', 0))
 
+    # ─────────────────────── Tab 4: CVA
+    with tabs[3]:
+        st.subheader("Contagion-Adjusted CVA")
+        _render_cva_tab(tickers, n_nodes, weights, notional, pd_baseline, baseline_attn,
+                        cva_engine, hmm, shock_ran, st.session_state)
+
+    # ─────────────────────── Tab 5: SIFI Ranking
+    with tabs[4]:
+        st.subheader("Systemically Important Financial Institutions (SIFI)")
+        _render_sifi_tab(tickers, n_nodes, baseline_attn, pd_baseline)
+
+    # ─────────────────────── Tab 6: XAI Explainer
+    with tabs[5]:
+        st.subheader("GNN Prediction Explainer")
+        _render_xai_tab(engine, tickers, n_nodes, device, config)
+
 
 # ═══════════════════════════════════════════════════ helper renderers
 
 def _render_network(tickers, pd_vals, graph_data, att_data, shocked_idx=None, victims=None):
-    # Use edge_index from attention output (includes GAT self-loops)
     edge_index = att_data[0].cpu().numpy()
     att_weights = att_data[1].cpu().squeeze().numpy()
 
@@ -288,7 +339,7 @@ def _render_network(tickers, pd_vals, graph_data, att_data, shocked_idx=None, vi
         for i in range(edge_index.shape[1]):
             u, v = int(edge_index[0, i]), int(edge_index[1, i])
             if u == v or u >= n or v >= n:
-                continue  # skip self-loops and out-of-range
+                continue
             if u == shocked_idx and v in victim_set:
                 edges.append(Edge(source=tickers[u], target=tickers[v],
                                   color="#ff4b4b", width=float(att_weights[i] * 70)))
@@ -307,43 +358,40 @@ def _render_network(tickers, pd_vals, graph_data, att_data, shocked_idx=None, vi
     agraph(nodes=nodes, edges=edges, config=cfg)
 
 
-@st.cache_data(ttl=3600)
-def _compute_multiplier_cached(_model, _root_dir, shock_mag, crisis_date,
-                                normal_date, seq_len, device):
-    """Precompute crisis vs normal contagion multiplier (cached, expensive)."""
-    from training.dataset import FinancialGraphDataset
-    full_ds = FinancialGraphDataset(_root_dir, split='all', seq_len=seq_len)
-    return compute_regime_contagion_multiplier(
-        _model, full_ds, shock_mag, crisis_date, normal_date, device)
-
-
-
 def _render_var_tab(features, meta, tickers, weights, var_engine, hmm, config):
-    """Render the VaR analysis tab."""
-    # Build portfolio return series from raw log returns
     log_returns = features[:, :, 0].numpy()  # (N, T)
     portfolio_returns = (weights[:, None] * log_returns).sum(axis=0)  # (T,)
 
-    # Dynamic correlation matrix from latest 60-day window
     window = config['graph']['window']
     recent_returns = log_returns[:, -window:]
     corr_matrix = np.corrcoef(recent_returns)
     per_stock_vol = log_returns[:, -window:].std(axis=1)
 
-    # Get crisis posteriors for importance weighting
     regime_label = "NORMAL"
     crisis_posteriors = None
+    crisis_prob = 0.0
     if hmm.posteriors is not None:
         latest_date = meta['dates'][-1].strftime('%Y-%m-%d')
-        regime_label, _ = hmm.get_regime(latest_date)
+        regime_label, crisis_prob = hmm.get_regime(latest_date)
         lookback = var_engine.lookback_days
         crisis_posteriors = hmm.posteriors[-lookback:, hmm.crisis_state]
+
+    # Show current regime inline
+    regime_color = "#ff4b4b" if regime_label == "CRISIS" else "#00c853"
+    st.markdown(
+        f'<span style="background:{regime_color}22;border:1px solid {regime_color};'
+        f'border-radius:4px;padding:3px 10px;color:{regime_color};font-weight:bold;">'
+        f'{regime_label} regime — crisis posterior {crisis_prob*100:.1f}%</span>'
+        f'&nbsp;<span style="color:#aaa;font-size:12px;">'
+        f'(HS uses importance-weighting in CRISIS mode)</span>',
+        unsafe_allow_html=True,
+    )
+    st.markdown("")
 
     var_results = var_engine.compute_all(
         portfolio_returns, weights, corr_matrix, per_stock_vol,
         crisis_posteriors, regime_label)
 
-    # VaR Table — show HS and Parametric only (MC scaling needs further validation)
     table_rows = []
     for cl in config['var']['confidence_levels']:
         for method_key in ['HS', 'Parametric']:
@@ -351,16 +399,14 @@ def _render_var_tab(features, meta, tickers, weights, var_engine, hmm, config):
             table_rows.append({
                 'Confidence': f"{cl*100:.1f}%",
                 'Method': r['label'],
-                f'VaR': f"{r['VaR']*100:.3f}%",
-                f'CVaR (ES)': f"{r['CVaR']*100:.3f}%",
+                'VaR': f"{r['VaR']*100:.3f}%",
+                'CVaR (ES)': f"{r['CVaR']*100:.3f}%",
             })
     st.dataframe(pd.DataFrame(table_rows), use_container_width=True)
 
     st.markdown("---")
-
-    # Basel III Backtesting
     st.write("### Basel III Traffic Light Backtesting")
-    st.caption("Zone is evaluated on the most recent 250-day window only, per Basel III standard.")
+    st.caption("Zone evaluated on the most recent 250-day window, per Basel III standard.")
     bt = var_engine.basel_backtest(portfolio_returns, weights, corr_matrix, per_stock_vol)
     zone_colors = {'GREEN': '🟢', 'YELLOW': '🟡', 'RED': '🔴'}
     col1, col2, col3, col4 = st.columns(4)
@@ -369,52 +415,72 @@ def _render_var_tab(features, meta, tickers, weights, var_engine, hmm, config):
     col3.metric("Total Days", bt['total_days'])
     col4.metric("Zone", f"{zone_colors.get(bt['zone'], '')} {bt['zone']}")
 
-    # VaR vs Realized Returns time series
     if bt.get('var_series'):
         win = var_engine.basel_window
+        dates_axis = [meta['dates'][win + i].strftime('%Y-%m-%d')
+                      for i in range(len(bt['var_series']))]
+
         fig = go.Figure()
         fig.add_trace(go.Scatter(
+            x=dates_axis,
             y=portfolio_returns[win:] * 100,
-            mode='lines', name='Realized Return (%)', line=dict(color='white', width=0.5)))
+            mode='lines', name='Realized Return (%)',
+            line=dict(color='white', width=0.5)))
         fig.add_trace(go.Scatter(
+            x=dates_axis,
             y=[v * 100 for v in bt['var_series']],
-            mode='lines', name='99% VaR', line=dict(color='#ff4b4b', width=1.5)))
+            mode='lines', name='99% VaR',
+            line=dict(color='#ff4b4b', width=1.5)))
 
-        # Mark exceptions
         if bt.get('exception_days'):
-            exc_idx = [d - win for d in bt['exception_days']]
+            exc_dates = [meta['dates'][d].strftime('%Y-%m-%d') for d in bt['exception_days']]
             exc_vals = [portfolio_returns[d] * 100 for d in bt['exception_days']]
             fig.add_trace(go.Scatter(
-                x=exc_idx, y=exc_vals,
+                x=exc_dates, y=exc_vals,
                 mode='markers', name='Exceptions',
                 marker=dict(color='red', size=6, symbol='x')))
 
         fig.update_layout(height=350, margin=dict(l=0, r=0, t=10, b=0),
-                          template='plotly_dark', yaxis_title='Return (%)')
-        st.plotly_chart(fig, width='stretch')
+                          template='plotly_dark', yaxis_title='Return (%)',
+                          xaxis_title='Date')
+        st.plotly_chart(fig, use_container_width=True)
 
+    # HMM regime overlay (crisis posterior over time)
+    if hmm.posteriors is not None and hmm.dates is not None:
+        st.markdown("---")
+        st.write("### HMM Crisis Posterior — Full History")
+        regime_dates = [d.strftime('%Y-%m-%d') for d in hmm.dates]
+        crisis_post = hmm.posteriors[:, hmm.crisis_state]
+        fig2 = go.Figure()
+        fig2.add_trace(go.Scatter(
+            x=regime_dates, y=crisis_post,
+            mode='lines', name='Crisis Posterior',
+            line=dict(color='#e94560', width=1),
+            fill='tozeroy', fillcolor='rgba(233,69,96,0.15)'))
+        fig2.add_hline(y=0.5, line_dash='dash', line_color='white', opacity=0.4)
+        fig2.update_layout(height=200, margin=dict(l=0, r=0, t=10, b=0),
+                           template='plotly_dark',
+                           yaxis=dict(title='P(Crisis)', range=[0, 1]),
+                           xaxis_title='Date')
+        st.plotly_chart(fig2, use_container_width=True)
 
 
 def _render_frtb_tab(features, tickers, weights, notional, frtb_engine, shock_ran, shock_mag, target_idx):
-    # Base assumptions
     spots = np.ones(len(tickers)) * 100.0
     log_returns = features[:, :, 0].numpy()
     window = 60
-    # Annualized volatility
     vols = log_returns[:, -window:].std(axis=1) * np.sqrt(252)
-    
+
     baseline_res = frtb_engine.compute_sbm_capital(tickers, weights, notional, spots, vols)
-    
+
     if shock_ran:
-        # In a stress scenario, the shocked stock's price drops and vol spikes
         spots_shocked = spots.copy()
         spots_shocked[target_idx] *= (1.0 + shock_mag)
-        
         vols_shocked = vols.copy()
-        vols_shocked[target_idx] *= 1.5 # Assume 50% volatility spike for the shocked name
-        
+        vols_shocked[target_idx] *= 1.5
+
         shocked_res = frtb_engine.compute_sbm_capital(tickers, weights, notional, spots_shocked, vols_shocked)
-        
+
         st.info("Showing Post-Shock vs Pre-Shock FRTB Capital Requirements.")
         col1, col2, col3 = st.columns(3)
         col1.metric("Pre-Shock Capital Charge", f"₹{baseline_res['total_capital']:,.0f}")
@@ -424,22 +490,231 @@ def _render_frtb_tab(features, tickers, weights, notional, frtb_engine, shock_ra
     else:
         st.info("Baseline FRTB Capital Requirements. Run a Stress Test to see what-if impact.")
         st.metric("Total Capital Charge", f"₹{baseline_res['total_capital']:,.0f}")
-        
+
+    # Sector buckets — table + bar chart side-by-side
     st.markdown("### Sector Buckets Capital (K_b)")
     buckets = baseline_res['buckets']
     df_buckets = pd.DataFrame(list(buckets.items()), columns=['Sector', 'Capital Charge'])
-    df_buckets['Capital Charge'] = df_buckets['Capital Charge'].apply(lambda x: f"₹{x:,.0f}")
-    st.dataframe(df_buckets, use_container_width=True)
+
+    col_tbl, col_chart = st.columns([1, 2])
+    with col_tbl:
+        df_display = df_buckets.copy()
+        df_display['Capital Charge'] = df_display['Capital Charge'].apply(lambda x: f"₹{x:,.0f}")
+        st.dataframe(df_display, use_container_width=True)
+    with col_chart:
+        fig = px.bar(df_buckets.sort_values('Capital Charge', ascending=True),
+                     x='Capital Charge', y='Sector', orientation='h',
+                     color='Capital Charge', color_continuous_scale='Blues',
+                     title="K_b by Sector")
+        fig.update_layout(height=300, margin=dict(l=0, r=0, t=30, b=0),
+                          template='plotly_dark', showlegend=False)
+        st.plotly_chart(fig, use_container_width=True)
 
     st.markdown("### Option Sensitivities (Greeks)")
     df_greeks = pd.DataFrame({
         'Ticker': tickers,
-        'Delta': baseline_res['delta'],
-        'Vega': baseline_res['vega']
+        'Delta': [f"{v:.4f}" for v in baseline_res['delta']],
+        'Vega': [f"{v:.2f}" for v in baseline_res['vega']],
     })
-    df_greeks['Delta'] = df_greeks['Delta'].apply(lambda x: f"{x:.4f}")
-    df_greeks['Vega'] = df_greeks['Vega'].apply(lambda x: f"{x:.2f}")
     st.dataframe(df_greeks, use_container_width=True)
+
+
+def _render_cva_tab(tickers, n_nodes, weights, notional, pd_baseline, baseline_attn,
+                    cva_engine, hmm, shock_ran, session):
+    st.caption(
+        "CVA = EAD × LGD × DistressScore × λ  |  "
+        "Point-in-time, no discount curve  |  LGD = 0.60 (fixed)  |  "
+        "PD is model distress score, not Basel credit PD."
+    )
+
+    edge_index = baseline_attn[0].cpu().numpy()
+    att_weights = baseline_attn[1].cpu().squeeze().numpy()
+    att_matrix = CVAEngine.build_attention_matrix(edge_index, att_weights, n_nodes)
+
+    lambda_ = hmm.lambda_ if hmm.lambda_ else 1.0
+
+    # Shock vector: zero everywhere except shocked firm
+    shock_vec = np.zeros(n_nodes)
+    if shock_ran and 'target_idx' in session and 'shock_magnitude' in session:
+        shock_vec[session['target_idx']] = session['shock_magnitude']
+
+    result = cva_engine.compute(
+        tickers, weights, pd_baseline, att_matrix,
+        shock_vec, lambda_=lambda_, notional=notional
+    )
+
+    agg = result['aggregate']
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("CVA Baseline Total", f"₹{agg['CVA_baseline_total']:,.0f}")
+    col2.metric("CVA Post-Shock Total", f"₹{agg['CVA_post_shock_total']:,.0f}")
+    delta_cva = agg['ΔCVA_total']
+    col3.metric("ΔCVA", f"₹{delta_cva:,.0f}",
+                delta=f"+₹{delta_cva:,.0f}" if delta_cva >= 0 else f"₹{delta_cva:,.0f}",
+                delta_color="inverse")
+    col4.metric("HMM λ (stress multiplier)", f"{lambda_:.3f}")
+
+    st.markdown("---")
+    df = pd.DataFrame(result['per_firm'])
+    # Format for display
+    for col in ['EAD', 'CVA_baseline', 'CVA_post_shock', 'ΔCVA']:
+        df[col] = df[col].apply(lambda x: f"₹{x:,.0f}")
+    df['PD_baseline'] = df['PD_baseline'].apply(lambda x: f"{x*100:.2f}%")
+    df['PD_updated'] = df['PD_updated'].apply(lambda x: f"{x*100:.2f}%")
+
+    # Only show firms with meaningful exposure
+    active_mask = weights > 0
+    df_active = df[[active_mask[i] for i in range(len(tickers))]]
+    st.write(f"### Per-Firm CVA ({active_mask.sum()} active positions)")
+    st.dataframe(df_active, use_container_width=True)
+
+    # Bar chart: ΔCVA per firm (raw floats)
+    df_raw = pd.DataFrame(result['per_firm'])
+    df_raw = df_raw[[active_mask[i] for i in range(len(tickers))]]
+    if shock_ran and df_raw['ΔCVA'].abs().max() > 0:
+        df_raw = df_raw.sort_values('ΔCVA', ascending=False).head(15)
+        fig = px.bar(df_raw, x='Ticker', y='ΔCVA',
+                     color='ΔCVA', color_continuous_scale='RdYlGn_r',
+                     title="Top 15 Firms by ΔCVA (post-shock)")
+        fig.update_layout(height=300, margin=dict(l=0, r=0, t=30, b=0),
+                          template='plotly_dark')
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("Run a Stress Test from the sidebar to see post-shock ΔCVA.")
+
+
+def _render_sifi_tab(tickers, n_nodes, baseline_attn, pd_baseline):
+    st.write(
+        "SIFI score = aggregate outgoing GAT attention weight per firm, "
+        "reflecting each firm's capacity to transmit distress across the network."
+    )
+
+    edge_index = baseline_attn[0].cpu().numpy()
+    att_weights = baseline_attn[1].cpu().squeeze().numpy()
+
+    sifi_scores = np.zeros(n_nodes)
+    for e in range(edge_index.shape[1]):
+        src = int(edge_index[0, e])
+        if src < n_nodes:
+            sifi_scores[src] += att_weights[e]
+
+    ranked = np.argsort(sifi_scores)[::-1]
+
+    # Top 5 metrics
+    st.markdown("#### Top 5 Systemic Risk Transmitters")
+    cols = st.columns(5)
+    for i in range(5):
+        idx = ranked[i]
+        cols[i].metric(
+            label=tickers[idx],
+            value=f"{sifi_scores[idx]:.4f}",
+            delta=f"PD {pd_baseline[idx]*100:.1f}%",
+            delta_color="off"
+        )
+
+    st.markdown("---")
+
+    # Full ranking table + chart
+    df = pd.DataFrame({
+        'Rank': range(1, n_nodes + 1),
+        'Ticker': [tickers[ranked[i]] for i in range(n_nodes)],
+        'Spillover Score': [sifi_scores[ranked[i]] for i in range(n_nodes)],
+        'Baseline PD (%)': [pd_baseline[ranked[i]] * 100 for i in range(n_nodes)],
+    })
+
+    col_tbl, col_chart = st.columns([1, 2])
+    with col_tbl:
+        st.write("#### Full SIFI Rankings")
+        df_display = df.copy()
+        df_display['Spillover Score'] = df_display['Spillover Score'].apply(lambda x: f"{x:.4f}")
+        df_display['Baseline PD (%)'] = df_display['Baseline PD (%)'].apply(lambda x: f"{x:.2f}%")
+        st.dataframe(df_display, use_container_width=True, height=500)
+
+    with col_chart:
+        fig = px.bar(df.head(20).sort_values('Spillover Score', ascending=True),
+                     x='Spillover Score', y='Ticker', orientation='h',
+                     color='Baseline PD (%)', color_continuous_scale='YlOrRd',
+                     title="Top 20 SIFIs — Spillover Score (color = Baseline PD)")
+        fig.update_layout(height=550, margin=dict(l=0, r=0, t=30, b=0),
+                          template='plotly_dark')
+        st.plotly_chart(fig, use_container_width=True)
+
+
+def _render_xai_tab(engine, tickers, n_nodes, device, config):
+    st.write(
+        "GNNExplainer identifies which neighbor firms and which input features "
+        "drove the distress prediction for a selected firm on the latest snapshot."
+    )
+    st.warning(
+        "⚠️ GNNExplainer runs an optimization loop (200 epochs). "
+        "First run takes ~30–60s. Results are cached per (firm, snapshot)."
+    )
+
+    target_firm = st.selectbox("Select firm to explain", tickers)
+    node_idx = tickers.index(target_firm)
+
+    if st.button("🔍 Run Explanation", type="primary"):
+        with st.spinner(f"Running GNNExplainer for {target_firm}…"):
+            result = _run_explainer_cached(engine.model, engine.root_dir, node_idx,
+                                           config['model']['seq_len'], device)
+        st.session_state.xai_result = result
+        st.session_state.xai_firm = target_firm
+
+    xai_result = st.session_state.get('xai_result')
+    xai_firm = st.session_state.get('xai_firm')
+
+    if xai_result is None:
+        st.info("Select a firm and click 'Run Explanation' to generate attribution.")
+        return
+
+    if xai_firm != target_firm:
+        st.info(f"Showing cached explanation for **{xai_firm}**. Press Run to explain {target_firm}.")
+
+    st.markdown(f"### Explanation for **{xai_firm}**")
+    st.metric("Distress Score", f"{xai_result['distress_score']*100:.2f}%")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.write("#### Feature Attribution")
+        if xai_result['feature_importance']:
+            feat_df = pd.DataFrame(xai_result['feature_importance'])
+            fig = px.bar(feat_df.sort_values('contribution_pct', ascending=True),
+                         x='contribution_pct', y='feature', orientation='h',
+                         color='contribution_pct', color_continuous_scale='Blues',
+                         labels={'contribution_pct': 'Contribution (%)', 'feature': 'Feature'})
+            fig.update_layout(height=280, margin=dict(l=0, r=0, t=10, b=0),
+                              template='plotly_dark', showlegend=False)
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No feature importance available.")
+
+    with col2:
+        st.write("#### Counterparty Attribution (Top 10 Incoming)")
+        if xai_result['counterparty_importance']:
+            cp_df = pd.DataFrame(xai_result['counterparty_importance'])
+            fig = px.bar(cp_df.sort_values('contribution_pct', ascending=True),
+                         x='contribution_pct', y='counterparty', orientation='h',
+                         color='contribution_pct', color_continuous_scale='Reds',
+                         labels={'contribution_pct': 'Contribution (%)', 'counterparty': 'Counterparty'})
+            fig.update_layout(height=350, margin=dict(l=0, r=0, t=10, b=0),
+                              template='plotly_dark', showlegend=False)
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No counterparty importance available.")
+
+
+@st.cache_data(ttl=3600)
+def _run_explainer_cached(_model, _root_dir, node_idx, seq_len, device):
+    from training.dataset import FinancialGraphDataset
+    from xai.explainer import RASRExplainer
+
+    dataset = FinancialGraphDataset(_root_dir, split='all', seq_len=seq_len)
+    tickers = dataset.tickers
+    latest = dataset[len(dataset) - 1]
+
+    explainer = RASRExplainer(_model, device)
+    return explainer.explain_node(latest, node_idx, tickers)
+
 
 if __name__ == "__main__":
     main()
