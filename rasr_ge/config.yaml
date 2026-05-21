@@ -1,0 +1,62 @@
+data:
+  tickers_source: nifty50
+  start_date: "2015-01-01"
+  end_date: "2025-01-01"
+  train_end: "2023-12-31"
+  val_start: "2024-01-01"
+
+wavelet:
+  wavelet_name: "db4"
+  decomposition_level: 3
+  threshold_mode: "soft"
+
+graph:
+  window: 60
+  edge_threshold: 0.6
+
+model:
+  seq_len: 30
+  lstm_hidden: 64
+  lstm_layers: 2
+  gat_heads: 4
+  gat_out_dim: 32
+  dropout: 0.3
+
+training:
+  epochs: 100
+  batch_size: 32
+  lr: 1e-3
+  weight_decay: 1e-4
+  pos_weight: 5.0
+  early_stopping_patience: 10
+  eval_threshold: 0.500
+
+stress:
+  shock_magnitude: -0.40
+  propagation_steps: 1
+  counterfactual_snapshots:
+    - label: "2017 Baseline (Calm)"
+      date: "2017-06-01"
+    - label: "2020 Peak Crisis"
+      date: "2020-03-23"
+    - label: "2020 Recovery"
+      date: "2020-09-01"
+    - label: "Current"
+      date: null
+
+hmm:
+  n_states: 2
+  fit_start: "2015-01-01"
+  fit_end: "2021-12-31"
+  inference_start: "2022-01-01"
+  log_transform: true
+
+var:
+  confidence_levels: [0.95, 0.99, 0.995]
+  mc_simulations: 10000
+  lookback_days: 504
+  basel_window: 250
+
+cva:
+  lgd: 0.6
+  default_notional: 1000000
