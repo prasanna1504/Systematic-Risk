@@ -2,7 +2,8 @@
 
 ### *Can a graph neural network map contagion across Nifty 50 before a crash happens?*
 
-[![Streamlit App](https://img.shields.io/badge/Streamlit-Live%20Dashboard-FF4B4B?style=for-the-badge&logo=streamlit&logoColor=white)](https://prasanna1504-systematic-risk-rasr-gedashboardapp-eme0zz.streamlit.app/)
+🟢 **[Live Dashboard →](https://prasanna1504-systematic-risk-rasr-gedashboardapp-eme0zz.streamlit.app/)**
+
 ![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)
 ![PyTorch](https://img.shields.io/badge/PyTorch-Geometric-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white)
 ![Domain](https://img.shields.io/badge/Domain-Systemic%20Risk%20%7C%20Basel%20IV-0a66c2?style=for-the-badge)
