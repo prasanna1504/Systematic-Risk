@@ -1,14 +1,14 @@
 # Systematic Risk & Market Quantification Engine (RASR-GE)
 
-https://prasanna1504-systematic-risk-rasr-gedashboardapp-eme0zz.streamlit.app/
+🟢 **Live Demo:** [View Dashboard on Streamlit Cloud](https://prasanna1504-systematic-risk-rasr-gedashboardapp-eme0zz.streamlit.app/)
 
-## The Story: What We Are Building
+## 📖 Overview
 
 In the rapidly evolving landscape of quantitative finance and regulatory compliance, risk managers and quant traders need tools that go beyond basic historical simulations. They require systems that can handle the nuanced demands of Basel IV / FRTB (Fundamental Review of the Trading Book), model complex market regimes dynamically, and provide actionable, explainable intelligence during severe stress events.
 
 **RASR-GE (Regime-Aware Systemic Risk and General Equilibrium)** was built to bridge the gap between advanced econometric modeling and practical regulatory capital requirements. 
 
-We are building a comprehensive, production-grade **Market Risk Quantification System**. It acts as a unified engine designed to evaluate, explain, and mitigate risks across complex trading portfolios (specifically focusing on Indian Equities like the Nifty 50, but extensible to any asset class). The goal is to provide a unified platform where a risk manager can not only see their daily Value-at-Risk (VaR) but also instantly understand the regulatory capital impact of a hypothetical market crash.
+We developed a comprehensive, production-grade **Market Risk Quantification System**. It acts as a unified engine designed to evaluate, explain, and mitigate risks across complex trading portfolios (specifically focusing on Indian Equities like the Nifty 50, but extensible to any asset class). The goal is to provide a unified platform where a risk manager can not only see their daily Value-at-Risk (VaR) but also instantly understand the regulatory capital impact of a hypothetical market crash.
 
 ## 🎯 Key Capabilities & Architecture
 
@@ -22,19 +22,19 @@ Markets don't behave the same way in a crisis as they do in a bull run. Our syst
 Risk management is about preparing for the worst. The system features a robust **Shock Engine** and **Counterfactual Analysis** module. Users can simulate severe market shocks (e.g., a sudden 20% drop in financials or an interest rate spike) and instantly visualize the resulting impact on the portfolio's PnL and its subsequent FRTB capital charge requirements.
 
 ### 4. SIFI Ranking & Interconnectedness
-Understanding systemic risk means knowing which assets or institutions pose the greatest threat to the overall portfolio. The system calculates **Systemically Important Financial Institution (SIFI)** rankings to highlight vulnerabilities and interconnectedness within the holdings.
+Understanding systemic risk means knowing which assets or institutions pose the greatest threat to the overall portfolio. The system calculates **Systemically Important Financial Institution (SIFI)** rankings to highlight vulnerabilities and interconnectedness within the holdings using Graph Neural Networks (GNNs).
 
 ### 5. Explainable AI (XAI)
-When a model flags a massive spike in risk, stakeholders need to know *why*. The integrated **XAI Explainer** unboxes complex risk attributions, providing clear, human-readable explanations of which specific factors, assets, or regime shifts are driving up capital charges.
+When a model flags a massive spike in risk, stakeholders need to know *why*. The integrated **XAI Explainer** unboxes complex risk attributions using GNNExplainer, providing clear, human-readable explanations of which specific factors, assets, or regime shifts are driving up capital charges.
 
 ### 6. Interactive Streamlit Dashboard
 All of these complex backend calculations are surfaced through a dynamic, interactive web application built with Streamlit. This allows risk managers to manipulate portfolios, run stress tests, and view capital impacts in real-time without writing a single line of code.
 
 ## 🛠️ Technical Stack
 - **Language:** Python
-- **Core Libraries:** Pandas, NumPy, Scikit-learn, SciPy, Statsmodels
-- **Risk Models:** HMM (Regime Detection), Historical/Parametric VaR, CVA
-- **Frontend/Deployment:** Streamlit
+- **Core Libraries:** PyTorch, PyTorch Geometric, Pandas, NumPy, Scikit-learn
+- **Risk Models:** Graph Attention Networks (GAT), HMM (Regime Detection), Historical/Parametric VaR, CVA
+- **Frontend/Deployment:** Streamlit, Plotly, Streamlit-Agraph
 
 ## 🚀 Getting Started (Local Development)
 
@@ -46,12 +46,12 @@ All of these complex backend calculations are surfaced through a dynamic, intera
 
 2. **Install dependencies**
    ```bash
-   pip install -r rasr_ge/requirements.txt
+   pip install -r requirements.txt
    ```
 
 3. **Run the Streamlit Dashboard**
    ```bash
-   streamlit run rasr_ge/data_pipeline.py  # Replace with the main Streamlit app file if different
+   streamlit run rasr_ge/dashboard/app.py
    ```
 
-*(Note: Ensure you have the necessary data files in `rasr_ge/data/raw/` or run the extraction scripts first.)*
+*(Note: The repository includes preprocessed data in `rasr_ge/data/processed/`. You can immediately run the dashboard to explore the system.)*
